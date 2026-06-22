@@ -14,7 +14,8 @@ import (
 #2DO:
 	- Parralelization
 		- routinen x
-		- worker pool (load balancing)
+		- worker pool (load balancing) x
+	- Default port range: 1000 setzen
 	- File Output
 	- DNS Namensauflösung bei Hostnamen in der Eingabe
 	- Annahme von Targetlisten
@@ -26,7 +27,9 @@ import (
 
 var portList []int
 var target, ports, targetList string
-var simpleTCPScan, allPorts,check bool
+var simpleTCPScan, allPorts,check, filterClosed bool
+var printLock sync.Mutex
+var resultList []string
 
 
 func CmdLineArgs() {
@@ -34,20 +37,21 @@ func CmdLineArgs() {
 	flag.StringVar(&targetList, "iL", "", "List of Target IPv4 Adresses or Hostnames")
 	flag.StringVar(&ports, "p", "", "Target Ports (comma-separated)")
 	flag.BoolVar(&simpleTCPScan, "sT", false, "Start Simple TCP Scan")
-	flag.BoolVar(&allPorts, "p-", false, "Scannt alle Ports")
+	flag.BoolVar(&allPorts, "pA", false, "Scannt alle Ports")
+	flag.BoolVar(&filterClosed, "fC", false, "Filtert die geschlossenen Ports heraus")
+
 }
 
 // überprüft die notwendigen Flags ((-p || -p-) && -t)
 // -> bricht das Program ab, sollten sie nicht vorhanden sein
 func CheckRequirements() {
-	if (ports != "" || allPorts) && target != "" {
-		target = strings.TrimSpace(target)
-		return 
+	if target != "" {
+	    target = strings.TrimSpace(target)
+	    return
 	}
-	else {
-		fmt.Println("[!] Benötigt werden Parameter Argumente zu target (-t) und port (-p <portrange:1-80>||<einzelner port:80>||<portlist:80,445,443>) oder alle Ports (-p-)"))
-		os.Exit(1)
-	}
+
+	fmt.Println("[!] Benötigt werden Parameter Argumente zu target (Bspw. -t 1.1.1.1)")
+	os.Exit(1)
 }
 
 // hier wird die PortRange initialisiert
@@ -64,10 +68,13 @@ func InitPortRange() []int {
 		for i := floor; i <= ceiling; i++ {
 			lports = append(lports, i)
 		}
-	} 
-
-	// Voraussetzung; Eine Port Range (floor-ceiling) wurde als Argument für -p angegeben
-	else if strings.Contains(ports, "-") {
+	} else if ports == "" { // es wurde keine port range angegeben
+		floor, ceiling = 1, 1000
+		lports = make([]int, 0, ceiling-floor+1)
+		for i := floor; i <= ceiling; i++ {
+			lports = append(lports, i)
+		}
+	} else if strings.Contains(ports, "-") { // Voraussetzung; Eine Port Range (floor-ceiling) wurde als Argument für -p angegeben
 		limitStr := strings.Split(ports, "-")
 
 		if len(limitStr) != 2 {
@@ -91,11 +98,8 @@ func InitPortRange() []int {
 		for i := floor; i <= ceiling; i++ {
 			lports = append(lports, i)
 		}
-	}
-
-	// Voraussetzung; Komma-separierte Port Liste als Argument für -p
+	} else if strings.Contains(ports, ",") { 	// Voraussetzung; Komma-separierte Port Liste als Argument für -p
 	// sollte eine komma-separierte liste an -p übergeben worden sein, wird diese augetrennt und jene Liste in eine Integer Liste umgewandelt 
-	else if strings.Contains(ports, ",") {
 		portStr := strings.Split(ports, ",")
 		for _, p := range portStr {
 			n, err := strconv.Atoi(strings.TrimSpace(p))
@@ -106,10 +110,7 @@ func InitPortRange() []int {
 			lports = append(lports, n)
 		}
 
-	}
-
-	// Default State: Es wird ein einziger Port als Parameter übergeben 
-	else {
+	} else { 	// Default State: Es wird ein einziger Port als Parameter übergeben 
 	    n, err := strconv.Atoi(strings.TrimSpace(ports))
 	    if err != nil {
 	        fmt.Println("[!] Ungültiger Port")
@@ -144,12 +145,27 @@ func Worker(jobs <-chan int, wg *sync.WaitGroup) {
 	for p := range jobs {
 		addr := fmt.Sprintf("%s:%d", target, p)
 		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-		if err != nil {
-			fmt.Println("closed", addr)
-			continue
-		}
-		conn.Close()
-		fmt.Println("open:", addr)
+
+        printLock.Lock()
+
+        if err != nil {
+            if !filterClosed {
+                result := fmt.Sprintf("closed %s", addr)
+                fmt.Println(result)
+                resultList = append(resultList, result)
+            }
+            printLock.Unlock()
+            continue
+        }
+
+        result := fmt.Sprintf("open %s", addr)
+        fmt.Println(result)
+        resultList = append(resultList, result)
+        conn.Close()
+
+        printLock.Unlock()
+
+
 	}
 
 
@@ -176,9 +192,8 @@ func SimpleTCPScan() {
 }
 
 func InitScan() {
-	if simpleTCPScan {
-		SimpleTCPScan()
-	}
+	// Standard TCP Scan
+	SimpleTCPScan()
 
 }
 
